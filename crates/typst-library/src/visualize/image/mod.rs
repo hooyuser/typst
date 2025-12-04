@@ -15,13 +15,14 @@ use std::fmt::{self, Debug, Formatter};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use comemo::{Prehashed, Tracked, TrackedMut};
 use ecow::EcoString;
 use hayro_syntax::LoadPdfError;
 use typst_syntax::{Span, Spanned};
 use typst_utils::{LazyHash, NonZeroExt};
 
 use crate::diag::{At, LoadedWithin, SourceResult, StrResult, bail, warning};
-use crate::engine::Engine;
+use crate::engine::{Engine, Sink};
 use crate::foundations::{
     Bytes, Cast, Content, Derived, NativeElement, Packed, Smart, StyleChain, Synthesize,
     cast, elem, func, scope,
@@ -312,8 +313,10 @@ impl Packed<ImageElem> {
                     SvgImage::with_fonts_images(
                         loaded.data.clone(),
                         engine.world,
-                        &families(styles).map(|f| f.as_str()).collect::<Vec<_>>(),
+                        &families(styles).map(|s| s.as_str()).collect::<Vec<_>>(),
                         svg_file,
+                        TrackedMut::reborrow_mut(&mut engine.sink),
+                        self.span(),
                     )
                     .within(loaded)?,
                 )

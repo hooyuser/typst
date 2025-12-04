@@ -307,13 +307,19 @@ pub struct GlyphFragment {
 
 impl GlyphFragment {
     /// Calls `new` with the given character.
+    /// Calls `new` with the given character.
     pub fn new_char(
-        ctx: &MathContext,
+        ctx: &mut MathContext,
         styles: StyleChain,
         c: char,
         span: Span,
     ) -> Option<Self> {
-        Self::new(ctx.engine.world, styles, c.encode_utf8(&mut [0; 4]), span)
+        let (fragment, warnings) =
+            Self::new(ctx.engine.world, styles, c.encode_utf8(&mut [0; 4]), span)?;
+        for warning in warnings {
+            ctx.engine.sink.warn(warning);
+        }
+        Some(fragment)
     }
 
     /// Selects a font to use and then shapes text.
@@ -323,10 +329,10 @@ impl GlyphFragment {
         styles: StyleChain,
         text: &str,
         span: Span,
-    ) -> Option<GlyphFragment> {
+    ) -> Option<(GlyphFragment, ecow::EcoVec<typst_library::diag::SourceDiagnostic>)> {
         assert!(text.graphemes(true).count() == 1);
 
-        let (font, glyphs) = shape(
+        let (font, glyphs, warnings) = shape(
             world,
             variant(styles),
             features(styles),
@@ -374,7 +380,7 @@ impl GlyphFragment {
             modifiers: FrameModifiers::get_in(styles),
         };
         fragment.update_glyph(true);
-        Some(fragment)
+        Some((fragment, warnings))
     }
 
     /// Sets element id and boxes in appropriate way without changing other

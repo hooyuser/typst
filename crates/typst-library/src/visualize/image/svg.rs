@@ -1,14 +1,16 @@
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
-use comemo::Tracked;
+use comemo::{Track, Tracked, TrackedMut};
 use ecow::{EcoString, eco_format};
 use rustc_hash::FxHashMap;
 use siphasher::sip128::{Hasher128, SipHasher13};
-use typst_syntax::FileId;
+use typst_syntax::{FileId, Span};
+use usvg;
 
 use crate::World;
-use crate::diag::{FileError, LoadError, LoadResult, ReportPos, format_xml_like_error};
+use crate::diag::{FileError, LoadError, LoadResult, ReportPos, format_xml_like_error, StrResult};
+use crate::engine::Sink;
 use crate::foundations::Bytes;
 use crate::layout::Axes;
 use crate::visualize::VectorFormat;
@@ -49,9 +51,11 @@ impl SvgImage {
         world: Tracked<dyn World + '_>,
         families: &[&str],
         svg_file: Option<FileId>,
+        tracer: TrackedMut<Sink>,
+        span: Span,
     ) -> LoadResult<SvgImage> {
         let book = world.book();
-        let font_resolver = Mutex::new(FontResolver::new(world, book, families));
+        let font_resolver = Mutex::new(FontResolver::new(world, book, families, span));
         let image_resolver = Mutex::new(ImageResolver::new(world, svg_file));
         let tree = usvg::Tree::from_data(
             &data,
@@ -81,7 +85,11 @@ impl SvgImage {
         if let Some(err) = image_resolver.into_inner().unwrap().error {
             return Err(err);
         }
-        let font_hash = font_resolver.into_inner().unwrap().finish();
+        let (font_hash, warnings) = font_resolver.into_inner().unwrap().finish();
+        let mut tracer = tracer;
+        for warning in warnings {
+            tracer.warn(warning);
+        }
         Ok(Self(Arc::new(Repr { data, size: tree_size(&tree), font_hash, tree })))
     }
 
@@ -170,6 +178,10 @@ struct FontResolver<'a> {
     from_id: FxHashMap<fontdb::ID, Font>,
     /// Accumulates a hash of all used fonts.
     hasher: SipHasher13,
+    /// The span to report warnings at.
+    span: Span,
+    /// Collected warnings.
+    warnings: Vec<crate::diag::SourceDiagnostic>,
 }
 
 impl<'a> FontResolver<'a> {
@@ -178,6 +190,7 @@ impl<'a> FontResolver<'a> {
         world: Tracked<'a, dyn World + 'a>,
         book: &'a FontBook,
         families: &'a [&'a str],
+        span: Span,
     ) -> Self {
         Self {
             book,
@@ -186,12 +199,14 @@ impl<'a> FontResolver<'a> {
             to_id: FxHashMap::default(),
             from_id: FxHashMap::default(),
             hasher: SipHasher13::new(),
+            span,
+            warnings: Vec::new(),
         }
     }
 
     /// Returns a hash of all used fonts.
-    fn finish(self) -> u128 {
-        self.hasher.finish128().as_u128()
+    fn finish(self) -> (u128, Vec<crate::diag::SourceDiagnostic>) {
+        (self.hasher.finish128().as_u128(), self.warnings)
     }
 }
 
@@ -208,8 +223,10 @@ impl FontResolver<'_> {
             stretch: font.stretch().into(),
         };
 
-        // Find a family that is available.
-        font.families()
+        let mut sink = Sink::new();
+        let book = self.book;
+        let span = self.span;
+        let id = font.families()
             .iter()
             .filter_map(|family| match family {
                 usvg::FontFamily::Named(named) => Some(named.as_str()),
@@ -217,8 +234,17 @@ impl FontResolver<'_> {
                 _ => None,
             })
             .chain(self.families.iter().copied())
-            .filter_map(|named| self.book.select(&named.to_lowercase(), variant))
-            .find_map(|index| self.get_or_load(index, db))
+            .filter_map(|named| {
+                book.select(
+                    &named.to_lowercase(),
+                    variant,
+                    Some((sink.track_mut(), span)),
+                )
+            })
+            .find_map(|index| self.get_or_load(index, db));
+
+        self.warnings.extend(sink.warnings());
+        id
     }
 
     /// Select a fallback font.
@@ -241,8 +267,14 @@ impl FontResolver<'_> {
         let variant = like.map(|info| info.variant).unwrap_or_default();
 
         // Select the font.
-        let index =
-            self.book.select_fallback(like, variant, c.encode_utf8(&mut [0; 4]))?;
+        let mut sink = Sink::new();
+        let index = self.book.select_fallback(
+            like,
+            variant,
+            c.encode_utf8(&mut [0; 4]),
+            Some((sink.track_mut(), self.span)),
+        )?;
+        self.warnings.extend(sink.warnings());
 
         self.get_or_load(index, db)
     }

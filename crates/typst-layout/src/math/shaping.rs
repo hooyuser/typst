@@ -1,7 +1,7 @@
 use std::ops::{Deref, DerefMut};
 
 use az::SaturatingAs;
-use comemo::Tracked;
+use comemo::{Track, Tracked, TrackedMut};
 use ecow::EcoString;
 use rustybuzz::{BufferFlags, UnicodeBuffer};
 use typst_library::World;
@@ -145,7 +145,8 @@ pub fn shape(
     fallback: bool,
     text: &str,
     families: Vec<&FontFamily>,
-) -> Option<(Font, Vec<ShapedGlyph>)> {
+) -> Option<(Font, Vec<ShapedGlyph>, ecow::EcoVec<typst_library::diag::SourceDiagnostic>)> {
+    let mut sink = typst_library::engine::Sink::new();
     let mut ctx = ShapingContext {
         world,
         used: vec![],
@@ -155,11 +156,12 @@ pub fn shape(
         fallback,
         glyphs: vec![],
         font: None,
+        sink: Some(sink.track_mut()),
     };
 
     shape_impl(&mut ctx, text, families.into_iter());
 
-    Some((ctx.font?, ctx.glyphs))
+    Some((ctx.font?, ctx.glyphs, sink.warnings()))
 }
 
 /// Holds shaping results and metadata for shaping some text.
@@ -172,6 +174,7 @@ struct ShapingContext<'a> {
     fallback: bool,
     glyphs: Vec<ShapedGlyph>,
     font: Option<Font>,
+    sink: Option<TrackedMut<'a, typst_library::engine::Sink>>,
 }
 
 impl<'a> SharedShapingContext<'a> for ShapingContext<'a> {
@@ -193,6 +196,10 @@ impl<'a> SharedShapingContext<'a> for ShapingContext<'a> {
 
     fn fallback(&self) -> bool {
         self.fallback
+    }
+
+    fn sink(&mut self) -> Option<TrackedMut<typst_library::engine::Sink>> {
+        self.sink.as_mut().map(|s| TrackedMut::reborrow_mut(s))
     }
 }
 

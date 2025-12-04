@@ -57,7 +57,7 @@ pub fn layout_equation_inline(
     assert!(!elem.block.get(styles));
 
     let span = elem.span();
-    let font = get_font(engine.world, styles, span)?;
+    let font = get_font(engine, styles, span)?;
     warn_non_math_font(&font, engine, span);
 
     let mut locator = locator.split();
@@ -113,7 +113,7 @@ pub fn layout_equation_block(
     assert!(elem.block.get(styles));
 
     let span = elem.span();
-    let font = get_font(engine.world, styles, span)?;
+    let font = get_font(engine, styles, span)?;
     warn_non_math_font(&font, engine, span);
 
     let mut locator = locator.split();
@@ -463,7 +463,7 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
             // change in font variant probably won't have an effect on metrics.
             if styles != outer_styles && styles.get_ref(TextElem::font) != outer_font {
                 self.fonts_stack
-                    .push(get_font(self.engine.world, styles, elem.span())?);
+                    .push(get_font(self.engine, styles, elem.span())?);
                 let scale_style = style_for_script_scale(self.font());
                 layout_realized(elem, self, styles.chain(&scale_style))?;
                 self.fonts_stack.pop();
@@ -659,16 +659,21 @@ fn style_for_script_scale(font: &Font) -> LazyHash<Style> {
 
 /// Get the current base font.
 fn get_font(
-    world: Tracked<dyn World + '_>,
+    engine: &mut Engine,
     styles: StyleChain,
     span: Span,
 ) -> SourceResult<Font> {
     let variant = variant(styles);
+    let world = engine.world;
     families(styles)
         .find_map(|family| {
             world
                 .book()
-                .select(family.as_str(), variant)
+                .select(
+                    family.as_str(),
+                    variant,
+                    Some((TrackedMut::reborrow_mut(&mut engine.sink), span)),
+                )
                 .and_then(|id| world.font(id))
                 .filter(|_| family.covers().is_none())
         })

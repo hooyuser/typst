@@ -148,9 +148,12 @@ pub fn layout_symbol(
             .collect();
         let styles = if enable_dtls { styles.chain(&dtls) } else { styles };
 
-        if let Some(mut glyph) =
+        if let Some((mut glyph, warnings)) =
             GlyphFragment::new(ctx.engine.world, styles, &text, elem.span())
         {
+            for warning in warnings {
+                ctx.engine.sink.warn(warning);
+            }
             if glyph.class == MathClass::Large {
                 if styles.get(EquationElem::size) == MathSize::Display {
                     let height = glyph

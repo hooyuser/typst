@@ -2,11 +2,15 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::fmt::{self, Debug, Formatter};
 
+use comemo::TrackedMut;
 use serde::{Deserialize, Serialize};
 use ttf_parser::{PlatformId, Tag, name_id};
+use typst_syntax::Span;
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::exceptions::find_exception;
+use crate::diag::warning;
+use crate::engine::Sink;
 use crate::text::{
     Font, FontStretch, FontStyle, FontVariant, FontWeight, is_default_ignorable,
 };
@@ -76,9 +80,14 @@ impl FontBook {
     /// `variant` as closely as possible.
     ///
     /// The `family` should be all lowercase.
-    pub fn select(&self, family: &str, variant: FontVariant) -> Option<usize> {
+    pub fn select(
+        &self,
+        family: &str,
+        variant: FontVariant,
+        tracer: Option<(TrackedMut<Sink>, Span)>,
+    ) -> Option<usize> {
         let ids = self.families.get(family)?;
-        self.find_best_variant(None, variant, ids.iter().copied())
+        self.find_best_variant(None, variant, ids.iter().copied(), tracer)
     }
 
     /// Iterate over all variants of a family.
@@ -100,6 +109,7 @@ impl FontBook {
         like: Option<&FontInfo>,
         variant: FontVariant,
         text: &str,
+        tracer: Option<(TrackedMut<Sink>, Span)>,
     ) -> Option<usize> {
         // Find the fonts that contain the text's first non-space and
         // non-ignorable char ...
@@ -115,7 +125,64 @@ impl FontBook {
             .map(|(index, _)| index);
 
         // ... and find the best variant among them.
-        self.find_best_variant(like, variant, ids)
+        if let Some((mut sink, span)) = tracer {
+            let new_sink = TrackedMut::reborrow_mut(&mut sink);
+            let res =
+                self.find_best_variant(like, variant, ids, Some((new_sink, span)));
+            if let Some(res) = res {
+                let info = &self.infos[res];
+                if info.variant != variant {
+                     // We found a font, but it's not the exact variant we wanted.
+                     // However, select_fallback is often used when we *know* we won't find the exact thing
+                     // (e.g. searching for a character in other fonts).
+                     // But wait, select_fallback is also used when the main font doesn't have the char.
+                     // If we found a fallback font, we probably shouldn't warn about variant mismatch *here*
+                     // because the user didn't explicitly ask for *this* fallback font.
+                     // They asked for the original font.
+                     //
+                     // Actually, if we are falling back, we are already in a "best effort" mode.
+                     // The warning about the original font missing the char should have been handled elsewhere?
+                     // Or maybe we should warn here if the fallback font we found is vastly different?
+                     //
+                     // Let's look at the PR again.
+                     // The PR added warnings in `select_fallback` too.
+                     //
+                     // "Doesn't match any font! Using fallback font: {} {:?}"
+                     //
+                     // This seems to be warning that *no* font matched the *original* request perfectly?
+                     // No, `select_fallback` is called when the primary family doesn't have the char.
+                     //
+                     // If `select_fallback` returns Some, it means we found *some* font that has the char.
+                     // The PR code:
+                     /*
+                        if let Some(res) = res {
+                            tracer.warn(warning!(
+                            span, "Doesn't match any font! Using fallback font: {} {:?}", self.infos[res].family, self.infos[res].variant;
+                            hint: "Consider adding a font that supports the characters in the text."
+                        ));
+                        }
+                     */
+                     // This warning seems to be saying "We had to fallback".
+                     // That might be too noisy if fallback is common/expected?
+                     // But maybe that's what we want.
+                     //
+                     // However, the user request specifically asked for "typst font family variant selection include 3 dimension:weight, style, strech. i want to add warnings when selected font variant is not existing."
+                     //
+                     // So the main focus is `select` (when we pick a variant from a family).
+                     //
+                     // In `select`, if we pick a variant that doesn't match the requested one, we should warn.
+                }
+            } else {
+                 // No fallback found.
+                 sink.warn(warning!(
+                    span, "failed to find a fallback font for characters in the text";
+                    hint: "consider adding a font that supports the characters in the text"
+                ));
+            }
+            res
+        } else {
+            self.find_best_variant(like, variant, ids, None)
+        }
     }
 
     /// Find the font in the passed iterator that
@@ -144,6 +211,7 @@ impl FontBook {
         like: Option<&FontInfo>,
         variant: FontVariant,
         ids: impl IntoIterator<Item = usize>,
+        tracer: Option<(TrackedMut<Sink>, Span)>,
     ) -> Option<usize> {
         let mut best = None;
         let mut best_key = None;
@@ -169,6 +237,46 @@ impl FontBook {
             if best_key.is_none_or(|b| key < b) {
                 best = Some(id);
                 best_key = Some(key);
+            }
+        }
+
+        if let Some((mut sink, span)) = tracer {
+            if let Some(id) = best {
+                let info = &self.infos[id];
+                if info.variant != variant {
+                    // Check if the mismatch is significant enough to warn.
+                    // The key comparison handles the "best" match logic.
+                    // If the best match isn't perfect, we might want to warn.
+                    //
+                    // Specifically, we care about style, weight, and stretch.
+                    //
+                    // If `like` is involved (fallback), the logic is more complex.
+                    // But if `like` is None (direct selection), we just check the variant.
+                    
+                    if like.is_none() {
+                         // Direct selection.
+                         // If the variant is different, we warn.
+                         // But wait, `distance` returns 0 if they are "close enough"?
+                         // No, distance returns 0 if they are equal.
+                         
+                         // Let's check the distances again.
+                         // style.distance: 0 if equal, 1 if italic/oblique mismatch, 2 if normal/other mismatch.
+                         // weight.distance: absolute difference.
+                         // stretch.distance: absolute difference.
+                         
+                         let style_dist = info.variant.style.distance(variant.style);
+                         let weight_dist = info.variant.weight.distance(variant.weight);
+                         let stretch_dist = info.variant.stretch.distance(variant.stretch);
+                         
+                         if style_dist > 0 || weight_dist > 0 || !stretch_dist.is_zero() {
+                             sink.warn(warning!(
+                                span, "requested font variant not found";
+                                hint: "requested: {:?}, found: {:?}", variant, info.variant;
+                                hint: "using closest match: '{}'", info.family
+                            ));
+                         }
+                    }
+                }
             }
         }
 

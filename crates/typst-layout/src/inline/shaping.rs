@@ -4,15 +4,16 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use az::SaturatingAs;
-use comemo::Tracked;
+use comemo::{Tracked, TrackedMut};
 use rustybuzz::{BufferFlags, Feature, ShapePlan, UnicodeBuffer};
 use ttf_parser::Tag;
 use ttf_parser::gsub::SubstitutionSubtable;
 use typst_library::World;
-use typst_library::engine::Engine;
+use typst_library::engine::{Engine, Sink};
 use typst_library::foundations::{Regex, Smart, StyleChain};
 use typst_library::layout::{Abs, Dir, Em, Frame, FrameItem, Point, Rel, Size};
 use typst_library::model::{JustificationLimits, ParElem};
+use typst_syntax::Span;
 use typst_library::text::{
     Font, FontFamily, FontVariant, Glyph, Lang, Region, ShiftSettings, TextEdgeBounds,
     TextElem, TextItem, families, features, is_default_ignorable, language, variant,
@@ -382,229 +383,6 @@ impl<'a> ShapedText<'a> {
                         if shaped.is_justifiable() {
                             justification_right +=
                                 Em::from_abs(extra_justification, glyph_size)
-                        }
-
-                        frame.size_mut().x += justification_left.at(glyph_size)
-                            + justification_right.at(glyph_size);
-
-                        (
-                            shaped.x_advance + justification_left + justification_right,
-                            shaped.x_offset + justification_left,
-                        )
-                    } else {
-                        (Em::zero(), Em::zero())
-                    };
-                    i += 1;
-
-                    // We may not be able to reach the offset completely if
-                    // it exceeds u16, but better to have a roughly correct
-                    // span offset than nothing.
-                    let mut span = spans.span_at(shaped.range.start);
-                    span.1 = span.1.saturating_add(span_offset.saturating_as());
-
-                    // |<---- a Glyph ---->|
-                    //  -->|ShapedGlyph|<--
-                    // +---+-----------+---+
-                    // |   |  *********|   |
-                    // |   |  *        |   |
-                    // |   |  *    ****|   |
-                    // |   |  *       *|   |
-                    // |   |  *********|   |
-                    // +---+--+--------+---+
-                    //   A   B     C     D
-                    // Note A, B, D could be positive, zero, or negative.
-                    // A: justification_left
-                    // B: ShapedGlyph's x_offset
-                    //    (though a small part of the glyph may go inside B)
-                    // B+C: ShapedGlyph's x_advance
-                    // D: justification_right
-                    // A+B: Glyph's x_offset
-                    // A+B+C+D: Glyph's x_advance
-                    Glyph {
-                        id: shaped.glyph_id,
-                        x_advance,
-                        x_offset,
-                        y_advance: Em::zero(),
-                        y_offset: Em::zero(),
-                        range: (shaped.range.start - range.start).saturating_as()
-                            ..(shaped.range.end - range.start).saturating_as(),
-                        span,
-                    }
-                })
-                .collect();
-
-            let item = TextItem {
-                font,
-                size: glyph_size,
-                lang: self.lang,
-                region: self.region,
-                fill: fill.clone(),
-                stroke: stroke.clone().map(|s| s.unwrap_or_default()),
-                text: self.text[range.start - self.base..range.end - self.base].into(),
-                glyphs,
-            };
-
-            let width = item.width();
-            if decos.is_empty() {
-                frame.push(pos, FrameItem::Text(item));
-            } else {
-                // Apply line decorations.
-                frame.push(pos, FrameItem::Text(item.clone()));
-                for deco in &decos {
-                    decorate(&mut frame, deco, &item, width, shift, pos);
-                }
-            }
-
-            offset += width;
-        }
-
-        frame.modify_text(self.styles);
-        frame
-    }
-
-    /// Computes the width of a run of glyphs relative to the font size,
-    /// accounting for their individual scaling factors and other font metrics.
-    pub fn width(&self) -> Abs {
-        self.glyphs.iter().map(|g| g.x_advance.at(g.size)).sum()
-    }
-
-    /// Measure the top and bottom extent of this text.
-    pub fn measure(&self, engine: &Engine) -> (Abs, Abs) {
-        let mut top = Abs::zero();
-        let mut bottom = Abs::zero();
-
-        let size = self.styles.resolve(TextElem::size);
-        let top_edge = self.styles.get(TextElem::top_edge);
-        let bottom_edge = self.styles.get(TextElem::bottom_edge);
-
-        // Expand top and bottom by reading the font's vertical metrics.
-        let mut expand = |font: &Font, bounds: TextEdgeBounds| {
-            let (t, b) = font.edges(top_edge, bottom_edge, size, bounds);
-            top.set_max(t);
-            bottom.set_max(b);
-        };
-
-        if self.glyphs.is_fully_empty() {
-            // When there are no glyphs, we just use the vertical metrics of the
-            // first available font.
-            let world = engine.world;
-            for family in families(self.styles) {
-                if let Some(font) = world
-                    .book()
-                    .select(family.as_str(), self.variant)
-                    .and_then(|id| world.font(id))
-                {
-                    expand(&font, TextEdgeBounds::Zero);
-                    break;
-                }
-            }
-        } else {
-            for g in self.glyphs.iter() {
-                expand(&g.font, TextEdgeBounds::Glyph(g.glyph_id));
-            }
-        }
-
-        (top, bottom)
-    }
-
-    /// How many glyphs are in the text where we can insert additional
-    /// space when encountering underfull lines.
-    pub fn justifiables(&self) -> usize {
-        self.glyphs.iter().filter(|g| g.is_justifiable()).count()
-    }
-
-    /// Whether the last glyph is a CJK character which should not be justified
-    /// on line end.
-    pub fn cjk_justifiable_at_last(&self) -> bool {
-        self.glyphs
-            .last()
-            .map(|g| g.is_cj_script() || g.is_cjk_punctuation())
-            .unwrap_or(false)
-    }
-
-    /// The stretchability of the text.
-    pub fn stretchability(&self) -> Abs {
-        self.glyphs
-            .iter()
-            .map(|g| (g.stretchability().0 + g.stretchability().1).at(g.size))
-            .sum()
-    }
-
-    /// The shrinkability of the text
-    pub fn shrinkability(&self) -> Abs {
-        self.glyphs
-            .iter()
-            .map(|g| (g.shrinkability().0 + g.shrinkability().1).at(g.size))
-            .sum()
-    }
-
-    /// Reshape a range of the shaped text, reusing information from this
-    /// shaping process if possible.
-    ///
-    /// The text `range` is relative to the whole inline layout.
-    pub fn reshape(&'a self, engine: &Engine, text_range: Range) -> ShapedText<'a> {
-        let text = &self.text[text_range.start - self.base..text_range.end - self.base];
-        if let Some(glyphs) = self.slice_safe_to_break(text_range.clone()) {
-            #[cfg(debug_assertions)]
-            assert_all_glyphs_in_range(glyphs, text, text_range.clone());
-            Self {
-                base: text_range.start,
-                text,
-                dir: self.dir,
-                lang: self.lang,
-                region: self.region,
-                styles: self.styles,
-                variant: self.variant,
-                glyphs: Glyphs::from_slice(glyphs),
-            }
-        } else {
-            shape(
-                engine,
-                text_range.start,
-                text,
-                self.styles,
-                self.dir,
-                self.lang,
-                self.region,
-            )
-        }
-    }
-
-    /// Derive an empty text run with the same properties as this one.
-    pub fn empty(&self) -> Self {
-        Self { text: "", glyphs: Glyphs::from_slice(&[]), ..*self }
-    }
-
-    /// Creates shaped text containing a hyphen.
-    ///
-    /// If `soft` is true, the item will map to plain text as a soft hyphen.
-    /// Otherwise, it will map to a normal hyphen.
-    pub fn hyphen(
-        engine: &Engine,
-        fallback: bool,
-        base: &ShapedText<'a>,
-        pos: usize,
-        soft: bool,
-    ) -> Option<Self> {
-        let world = engine.world;
-        let book = world.book();
-        let fallback_func = if fallback {
-            Some(|| book.select_fallback(None, base.variant, "-"))
-        } else {
-            None
-        };
-        let mut chain = families(base.styles)
-            .filter(|family| family.covers().is_none_or(|c| c.is_match("-")))
-            .map(|family| book.select(family.as_str(), base.variant))
-            .chain(fallback_func.iter().map(|f| f()))
-            .flatten();
-
-        chain.find_map(|id| {
-            let font = world.font(id)?;
-            let ttf = font.ttf();
-            let glyph_id = ttf.glyph_index('-')?;
-            let x_advance = font.to_em(ttf.glyph_hor_advance(glyph_id)?);
-            let size = base.styles.resolve(TextElem::size);
             let (c, text) = if soft { (SHY, SHY_STR) } else { (HYPHEN, HYPHEN_STR) };
 
             Some(ShapedText {
@@ -716,7 +494,7 @@ impl Debug for ShapedText<'_> {
 /// items for them.
 pub fn shape_range<'a>(
     items: &mut Vec<(Range, Item<'a>)>,
-    engine: &Engine,
+    engine: &mut Engine,
     text: &'a str,
     bidi: &BidiInfo<'a>,
     range: Range,
@@ -780,7 +558,7 @@ fn is_compatible(a: Script, b: Script) -> bool {
 /// Shape text into [`ShapedText`].
 #[allow(clippy::too_many_arguments)]
 fn shape<'a>(
-    engine: &Engine,
+    engine: &mut Engine,
     base: usize,
     text: &'a str,
     styles: StyleChain<'a>,
@@ -801,6 +579,7 @@ fn shape<'a>(
         fallback: styles.get(TextElem::fallback),
         dir,
         shift_settings,
+        sink: TrackedMut::reborrow_mut(&mut engine.sink),
     };
 
     if !text.is_empty() {
@@ -839,6 +618,7 @@ struct ShapingContext<'a> {
     fallback: bool,
     dir: Dir,
     shift_settings: Option<ShiftSettings>,
+    sink: TrackedMut<'a, Sink>,
 }
 
 pub trait SharedShapingContext<'a> {
@@ -855,6 +635,8 @@ pub trait SharedShapingContext<'a> {
     fn variant(&self) -> FontVariant;
 
     fn fallback(&self) -> bool;
+
+    fn sink(&mut self) -> Option<TrackedMut<Sink>>;
 }
 
 impl<'a> SharedShapingContext<'a> for ShapingContext<'a> {
@@ -877,6 +659,10 @@ impl<'a> SharedShapingContext<'a> for ShapingContext<'a> {
     fn fallback(&self) -> bool {
         self.fallback
     }
+
+    fn sink(&mut self) -> Option<TrackedMut<Sink>> {
+        Some(TrackedMut::reborrow_mut(&mut self.sink))
+    }
 }
 
 pub fn get_font_and_covers<'a, C, F>(
@@ -896,7 +682,11 @@ where
     let mut covers = None;
     for family in families.by_ref() {
         selection = book
-            .select(family.as_str(), ctx.variant())
+            .select(
+                family.as_str(),
+                ctx.variant(),
+                ctx.sink().map(|s| (s, Span::detached())),
+            )
             .and_then(|id| world.font(id))
             .filter(|font| !ctx.used().contains(font));
         if selection.is_some() {
@@ -907,9 +697,15 @@ where
 
     // Do font fallback if the families are exhausted and fallback is enabled.
     if selection.is_none() && ctx.fallback() {
-        let first = ctx.first().map(Font::info);
+        let first_font = ctx.first().cloned();
+        let first_info = first_font.as_ref().map(|f| f.info());
         selection = book
-            .select_fallback(first, ctx.variant(), text)
+            .select_fallback(
+                first_info,
+                ctx.variant(),
+                text,
+                ctx.sink().map(|s| (s, Span::detached())),
+            )
             .and_then(|id| world.font(id))
             .filter(|font| !ctx.used().contains(font));
     }
