@@ -11,6 +11,24 @@ use crate::text::{
     Font, FontStretch, FontStyle, FontVariant, FontWeight, is_default_ignorable,
 };
 
+/// Result of selecting a font from the book.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum FontSelection {
+    /// Perfect match for requested family and variant.
+    Exact(usize),
+    /// Family matches but variant differs in weight, stretch, or style.
+    VariantFallback {
+        /// Selected font id.
+        id: usize,
+        /// The variant that was requested.
+        requested: FontVariant,
+        /// The variant that was actually selected.
+        matched: FontVariant,
+    },
+    /// Family not found.
+    NotFound,
+}
+
 /// Metadata about a collection of fonts.
 #[derive(Debug, Default, Clone, Hash)]
 pub struct FontBook {
@@ -77,8 +95,39 @@ impl FontBook {
     ///
     /// The `family` should be all lowercase.
     pub fn select(&self, family: &str, variant: FontVariant) -> Option<usize> {
-        let ids = self.families.get(family)?;
-        self.find_best_variant(None, variant, ids.iter().copied())
+        match self.select_detailed(family, variant) {
+            FontSelection::Exact(id) | FontSelection::VariantFallback { id, .. } => {
+                Some(id)
+            }
+            FontSelection::NotFound => None,
+        }
+    }
+
+    /// Try to find a font and return detailed information about the match.
+    ///
+    /// Returns [`FontSelection::Exact`] when weight, style, and stretch match
+    /// exactly, [`FontSelection::VariantFallback`] when the family matches but
+    /// any of the three differ, and [`FontSelection::NotFound`] otherwise.
+    pub fn select_detailed(&self, family: &str, variant: FontVariant) -> FontSelection {
+        let ids = match self.families.get(family) {
+            Some(ids) => ids,
+            None => return FontSelection::NotFound,
+        };
+
+        let Some(id) = self.find_best_variant(None, variant, ids.iter().copied()) else {
+            return FontSelection::NotFound;
+        };
+
+        let matched = self.infos[id].variant;
+        let style_dis = matched.style.distance(variant.style);
+        let stretch_dis = matched.stretch.distance(variant.stretch);
+        let weight_dis = matched.weight.distance(variant.weight);
+
+        if style_dis == 0 && stretch_dis.is_zero() && weight_dis == 0 {
+            FontSelection::Exact(id)
+        } else {
+            FontSelection::VariantFallback { id, requested: variant, matched }
+        }
     }
 
     /// Iterate over all variants of a family.

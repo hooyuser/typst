@@ -202,8 +202,13 @@ fn shape_impl<'a>(
     text: &str,
     mut families: impl Iterator<Item = &'a FontFamily> + Clone,
 ) {
-    let Some((font, covers)) =
-        get_font_and_covers(ctx, text, families.by_ref(), |ctx, text, font| {
+    let Some((font, covers)) = get_font_and_covers(
+        ctx,
+        None,
+        Span::detached(),
+        text,
+        families.by_ref(),
+        |ctx, text, font| {
             let add_glyph = |_| {
                 ctx.glyphs.push(ShapedGlyph {
                     id: 0,
@@ -215,8 +220,8 @@ fn shape_impl<'a>(
             };
             text.chars().for_each(add_glyph);
             ctx.font = Some(font);
-        })
-    else {
+        },
+    ) else {
         return;
     };
 

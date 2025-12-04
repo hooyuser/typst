@@ -6,7 +6,7 @@ mod book;
 mod exceptions;
 mod variant;
 
-pub use self::book::{Coverage, FontBook, FontFlags, FontInfo};
+pub use self::book::{Coverage, FontBook, FontFlags, FontInfo, FontSelection};
 pub use self::variant::{FontStretch, FontStyle, FontVariant, FontWeight};
 
 use std::cell::OnceCell;

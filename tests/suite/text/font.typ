@@ -77,6 +77,10 @@ I
 #let var = text(font: ("list-of", "nonexistent-fonts"))[don't]
 #var
 
+--- text-font-variant-mismatch-warning paged ---
+// Warning: 1:50-1:66 No font matches the requested weight, style and stretch: weight: 900, style: Normal, stretch: FontStretch(1000), Using fallback font: Libertinus Serif weight: 700, style: Normal, stretch: FontStretch(1000)
+#text(font: "Libertinus Serif", weight: "black")[Variant mismatch]
+
 --- issue-5499-text-fill-in-clip-block paged ---
 
 #let t = tiling(
