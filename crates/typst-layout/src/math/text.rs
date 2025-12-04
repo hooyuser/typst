@@ -149,7 +149,7 @@ pub fn layout_symbol(
         let styles = if enable_dtls { styles.chain(&dtls) } else { styles };
 
         if let Some(mut glyph) =
-            GlyphFragment::new(ctx.engine.world, styles, &text, elem.span())
+            GlyphFragment::new(ctx.engine, styles, &text, elem.span())
         {
             if glyph.class == MathClass::Large {
                 if styles.get(EquationElem::size) == MathSize::Display {

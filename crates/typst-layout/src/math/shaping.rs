@@ -5,6 +5,7 @@ use comemo::Tracked;
 use ecow::EcoString;
 use rustybuzz::{BufferFlags, UnicodeBuffer};
 use typst_library::World;
+use typst_library::engine::Engine;
 use typst_library::layout::{Abs, Em};
 use typst_library::text::{Font, FontFamily, FontVariant, Glyph, Lang, Region, TextItem};
 use typst_library::visualize::{FixedStroke, Paint};
@@ -136,18 +137,18 @@ pub struct ShapedGlyph {
 }
 
 /// Shape some text in math.
-#[comemo::memoize]
 pub fn shape(
-    world: Tracked<dyn World + '_>,
+    engine: &mut Engine,
     variant: FontVariant,
     features: Vec<rustybuzz::Feature>,
     language: rustybuzz::Language,
     fallback: bool,
     text: &str,
     families: Vec<&FontFamily>,
+    span: Span,
 ) -> Option<(Font, Vec<ShapedGlyph>)> {
     let mut ctx = ShapingContext {
-        world,
+        world: engine.world,
         used: vec![],
         variant,
         features,
@@ -157,7 +158,7 @@ pub fn shape(
         font: None,
     };
 
-    shape_impl(&mut ctx, text, families.into_iter());
+    shape_impl(&mut ctx, Some(engine), span, text, families.into_iter());
 
     Some((ctx.font?, ctx.glyphs))
 }
@@ -199,13 +200,16 @@ impl<'a> SharedShapingContext<'a> for ShapingContext<'a> {
 /// Shape text with font fallback using the `families` iterator.
 fn shape_impl<'a>(
     ctx: &mut ShapingContext<'a>,
+    mut engine: Option<&mut Engine>,
+    span: Span,
     text: &str,
     mut families: impl Iterator<Item = &'a FontFamily> + Clone,
 ) {
+    let engine_for_warn = engine.as_deref_mut();
     let Some((font, covers)) = get_font_and_covers(
         ctx,
-        None,
-        Span::detached(),
+        engine_for_warn,
+        span,
         text,
         families.by_ref(),
         |ctx, text, font| {
@@ -255,7 +259,7 @@ fn shape_impl<'a>(
     if buffer.glyph_infos().iter().any(|i| i.glyph_id == 0)
         || !covers.is_none_or(|cov| cov.is_match(text))
     {
-        shape_impl(ctx, text, families);
+        shape_impl(ctx, engine.as_deref_mut(), span, text, families);
     } else {
         for i in 0..buffer.len() {
             let info = buffer.glyph_infos()[i];

@@ -1,10 +1,9 @@
 use std::fmt::{self, Debug, Formatter};
 
-use comemo::Tracked;
 use ttf_parser::GlyphId;
 use ttf_parser::math::{GlyphAssembly, GlyphConstruction, GlyphPart};
-use typst_library::World;
 use typst_library::diag::warning;
+use typst_library::engine::Engine;
 use typst_library::foundations::StyleChain;
 use typst_library::introspection::Tag;
 use typst_library::layout::{
@@ -308,18 +307,17 @@ pub struct GlyphFragment {
 impl GlyphFragment {
     /// Calls `new` with the given character.
     pub fn new_char(
-        ctx: &MathContext,
+        ctx: &mut MathContext,
         styles: StyleChain,
         c: char,
         span: Span,
     ) -> Option<Self> {
-        Self::new(ctx.engine.world, styles, c.encode_utf8(&mut [0; 4]), span)
+        Self::new(ctx.engine, styles, c.encode_utf8(&mut [0; 4]), span)
     }
 
     /// Selects a font to use and then shapes text.
-    #[comemo::memoize]
     pub fn new(
-        world: Tracked<dyn World + '_>,
+        engine: &mut Engine,
         styles: StyleChain,
         text: &str,
         span: Span,
@@ -327,13 +325,14 @@ impl GlyphFragment {
         assert!(text.graphemes(true).count() == 1);
 
         let (font, glyphs) = shape(
-            world,
+            engine,
             variant(styles),
             features(styles),
             language(styles),
             styles.get(TextElem::fallback),
             text,
             families(styles).collect(),
+            span,
         )?;
 
         let item = ShapedText {
