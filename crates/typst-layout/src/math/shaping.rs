@@ -194,6 +194,10 @@ impl<'a> SharedShapingContext<'a> for ShapingContext<'a> {
     fn fallback(&self) -> bool {
         self.fallback
     }
+
+    fn warned_variants(&mut self) -> Option<&mut std::collections::HashSet<(String, FontVariant)>> {
+        None
+    }
 }
 
 /// Shape text with font fallback using the `families` iterator.

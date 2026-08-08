@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fmt::{self, Debug, Formatter};
 use std::ops::Deref;
 use std::sync::Arc;
@@ -816,6 +817,7 @@ fn shape<'a>(
         fallback: styles.get(TextElem::fallback),
         dir,
         shift_settings,
+        warned_variants: HashSet::new(),
     };
 
     if !text.is_empty() {
@@ -854,6 +856,7 @@ struct ShapingContext<'a> {
     fallback: bool,
     dir: Dir,
     shift_settings: Option<ShiftSettings>,
+    warned_variants: HashSet<(String, FontVariant)>,
 }
 
 pub trait SharedShapingContext<'a> {
@@ -870,6 +873,9 @@ pub trait SharedShapingContext<'a> {
     fn variant(&self) -> FontVariant;
 
     fn fallback(&self) -> bool;
+
+    /// Optional tracker to suppress duplicate variant mismatch warnings.
+    fn warned_variants(&mut self) -> Option<&mut HashSet<(String, FontVariant)>>;
 }
 
 impl<'a> SharedShapingContext<'a> for ShapingContext<'a> {
@@ -892,6 +898,10 @@ impl<'a> SharedShapingContext<'a> for ShapingContext<'a> {
     fn fallback(&self) -> bool {
         self.fallback
     }
+
+    fn warned_variants(&mut self) -> Option<&mut HashSet<(String, FontVariant)>> {
+        Some(&mut self.warned_variants)
+    }
 }
 
 pub fn get_font_and_covers<'a, C, F>(
@@ -906,7 +916,6 @@ where
     C: SharedShapingContext<'a>,
     F: FnMut(&mut C, &str, Font),
 {
-    let mut warned_variant = false;
     // Find the next available family.
     let world = ctx.world();
     let book = world.book();
@@ -916,9 +925,13 @@ where
         selection = match book.select_detailed(family.as_str(), ctx.variant()) {
             FontSelection::Exact(id) => world.font(id),
             FontSelection::VariantFallback { id, requested, matched } => {
-                if !warned_variant {
-                    if let Some(engine) = engine.as_deref_mut() {
-                        if let Some(info) = book.info(id) {
+                if let Some(engine) = engine.as_deref_mut() {
+                    if let Some(info) = book.info(id) {
+                        let should_warn = ctx
+                            .warned_variants()
+                            .map(|set| set.insert((info.family.clone(), requested)))
+                            .unwrap_or(true);
+                        if should_warn {
                             engine.sink.warn(warning!(
                                 span,
                                 "No font matches the requested weight, style and stretch: weight: {:?}, style: {:?}, stretch: {:?}, Using fallback font: {} weight: {:?}, style: {:?}, stretch: {:?}",
@@ -932,7 +945,6 @@ where
                             ));
                         }
                     }
-                    warned_variant = true;
                 }
                 world.font(id)
             }
