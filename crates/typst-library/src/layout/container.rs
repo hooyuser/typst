@@ -1,8 +1,9 @@
 use crate::diag::{HintedStrResult, SourceResult, bail};
 use crate::engine::Engine;
 use crate::foundations::{
-    Args, AutoValue, Construct, Content, Dict, Fold, FromValue, IntoValue, NativeElement,
-    Packed, Smart, StyleChain, Value, cast, elem,
+    AlternativeFold, Args, AutoValue, CastInfo, Construct, Content, Dict, Fold,
+    FromValue, IntoValue, NativeElement, Packed, Reflect, Resolve, Smart, StyleChain,
+    Value, cast, elem,
 };
 use crate::introspection::Locator;
 use crate::layout::{
@@ -217,6 +218,132 @@ pub enum InlineItem {
     Frame(Frame),
 }
 
+/// The top and bottom sides created when a container breaks across regions.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct BreakSides<T> {
+    /// The top side of a continuation.
+    pub top: T,
+    /// The bottom side before a continuation.
+    pub bottom: T,
+}
+
+impl<T> BreakSides<T> {
+    /// Creates break sides with separate top and bottom values.
+    pub const fn new(top: T, bottom: T) -> Self {
+        Self { top, bottom }
+    }
+
+    /// Creates break sides with the same value at the top and bottom.
+    pub fn splat(value: T) -> Self
+    where
+        T: Clone,
+    {
+        Self { top: value.clone(), bottom: value }
+    }
+
+    /// Maps both break sides with `f`.
+    pub fn map<F, U>(self, mut f: F) -> BreakSides<U>
+    where
+        F: FnMut(T) -> U,
+    {
+        BreakSides { top: f(self.top), bottom: f(self.bottom) }
+    }
+
+    /// Zips two break-side configurations component-wise.
+    pub fn zip<U>(self, other: BreakSides<U>) -> BreakSides<(T, U)> {
+        BreakSides {
+            top: (self.top, other.top),
+            bottom: (self.bottom, other.bottom),
+        }
+    }
+
+    /// Whether the top and bottom values are equal.
+    pub fn is_uniform(&self) -> bool
+    where
+        T: PartialEq,
+    {
+        self.top == self.bottom
+    }
+}
+
+impl<T: Reflect> Reflect for BreakSides<Option<T>> {
+    fn input() -> CastInfo {
+        T::input() + Dict::input()
+    }
+
+    fn output() -> CastInfo {
+        T::output() + Dict::output()
+    }
+
+    fn castable(value: &Value) -> bool {
+        Dict::castable(value) || T::castable(value)
+    }
+}
+
+impl<T> IntoValue for BreakSides<Option<T>>
+where
+    T: PartialEq + IntoValue,
+{
+    fn into_value(self) -> Value {
+        if self.is_uniform()
+            && let Some(top) = self.top
+        {
+            return top.into_value();
+        }
+
+        let mut dict = Dict::new();
+        if let Some(top) = self.top {
+            dict.insert("top".into(), top.into_value());
+        }
+        if let Some(bottom) = self.bottom {
+            dict.insert("bottom".into(), bottom.into_value());
+        }
+        Value::Dict(dict)
+    }
+}
+
+impl<T> FromValue for BreakSides<Option<T>>
+where
+    T: FromValue + Clone,
+{
+    fn from_value(mut value: Value) -> HintedStrResult<Self> {
+        let expected_keys = ["top", "bottom"];
+        if let Value::Dict(dict) = &mut value {
+            if dict.is_empty() {
+                return Ok(Self::splat(None));
+            } else if dict.iter().any(|(key, _)| expected_keys.contains(&key.as_str())) {
+                let mut take = |key| dict.take(key).ok().map(T::from_value).transpose();
+                let sides = Self { top: take("top")?, bottom: take("bottom")? };
+                dict.finish(&expected_keys)?;
+                return Ok(sides);
+            }
+        }
+
+        if T::castable(&value) {
+            Ok(Self::splat(Some(T::from_value(value)?)))
+        } else if let Value::Dict(dict) = &value {
+            let keys = dict.iter().map(|kv| kv.0.as_str()).collect();
+            Err(Dict::unexpected_keys(keys, None).into())
+        } else {
+            Err(Self::error(&value))
+        }
+    }
+}
+
+impl<T: Resolve> Resolve for BreakSides<T> {
+    type Output = BreakSides<T::Output>;
+
+    fn resolve(self, styles: StyleChain) -> Self::Output {
+        self.map(|value| value.resolve(styles))
+    }
+}
+
+impl<T: Fold> Fold for BreakSides<Option<T>> {
+    fn fold(self, outer: Self) -> Self {
+        self.zip(outer).map(|(inner, outer)| inner.fold_or(outer))
+    }
+}
+
 /// A block-level container.
 ///
 /// Such a container can be used to separate content, to @block.width[size] or
@@ -306,10 +433,54 @@ pub struct BlockElem {
     #[fold]
     pub stroke: Sides<Option<Option<Stroke>>>,
 
+    /// How to stroke the edges created when the block breaks across regions.
+    ///
+    /// A single stroke applies to both edges. A dictionary with the keys `top`
+    /// and `bottom` can configure them separately: `top` is the start of a
+    /// segment continued from a previous region, while `bottom` is the end of
+    /// a segment that continues in the next region. Other side keys are not
+    /// accepted.
+    ///
+    /// Omitted edges inherit the corresponding value from
+    /// @block.stroke[`stroke`]. Unspecified components of a break stroke, such
+    /// as its thickness or dash pattern, also inherit from the regular stroke.
+    /// Set this to `{none}` to remove both break strokes, or to `{auto}` to use
+    /// the regular strokes.
+    ///
+    /// ```example
+    /// #set page(height: 80pt)
+    /// #block(
+    ///   stroke: 1pt,
+    ///   break-stroke: (
+    ///     top: 1pt + gray,
+    ///     bottom: none,
+    ///   ),
+    ///   radius: 6pt,
+    ///   break-radius: 0pt,
+    ///   inset: 6pt,
+    ///   lorem(20),
+    /// )
+    /// ```
+    #[fold]
+    #[default(Smart::Auto)]
+    pub break_stroke: Smart<BreakSides<Option<Option<Stroke>>>>,
+
     /// How much to round the block's corners. See the
     /// @rect.radius[rectangle's documentation] for more details.
     #[fold]
     pub radius: Corners<Option<Rel<Length>>>,
+
+    /// How much to round the corners created when the block breaks across
+    /// regions.
+    ///
+    /// This accepts the same values as @block.radius[`radius`]. Only the two
+    /// corners adjoining an actual break are affected. Omitted corners inherit
+    /// their regular radius. Set this to `{0pt}` for straight break edges, or
+    /// to `{auto}` to use the regular radii. See the `break-stroke` example
+    /// above for a common configuration.
+    #[fold]
+    #[default(Smart::Auto)]
+    pub break_radius: Smart<Corners<Option<Rel<Length>>>>,
 
     /// How much to pad the block's content. See the
     /// @box.inset[box's documentation] for more details.

@@ -70,6 +70,123 @@ A
 #block(height: 30pt)
 B
 
+--- block-break-stroke-radius paged ---
+// Check the regular, bottom-break, both-break, and top-break variants. The
+// bottom break stroke only specifies a paint and inherits its thickness.
+#set page(width: 100pt, height: 60pt, margin: 5pt)
+#set block(above: 0pt, below: 0pt)
+#let styled-block(height) = block(
+  width: 60pt,
+  height: height,
+  fill: luma(240),
+  stroke: (
+    left: 1pt + black,
+    top: 3pt + black,
+    right: 1pt + black,
+    bottom: 3pt + black,
+  ),
+  break-stroke: (
+    top: 1pt + red,
+    bottom: (paint: blue),
+  ),
+  radius: 8pt,
+  break-radius: (top: 0pt, bottom-left: 2pt),
+)
+
+#styled-block(120pt)
+#pagebreak()
+// An unbroken block must ignore the break styles entirely.
+#styled-block(25pt)
+
+--- block-break-style-reset-none paged ---
+// `auto` resets an outer break style, while `none` removes a break edge.
+#set page(width: 100pt, height: 60pt, margin: 5pt)
+#set block(
+  above: 0pt,
+  below: 0pt,
+  width: 60pt,
+  height: 70pt,
+  stroke: 3pt + black,
+  radius: 8pt,
+  break-stroke: 2pt + red,
+  break-radius: 2pt,
+)
+
+#block(break-stroke: auto, break-radius: auto)
+#pagebreak()
+#block(break-stroke: none, break-radius: 0pt)
+#pagebreak()
+// An omitted side falls back to the corresponding regular stroke.
+#{
+  set block(break-stroke: auto, break-radius: auto)
+  block(break-stroke: (top: none), break-radius: (top: 0pt))
+}
+
+--- block-break-style-columns paged ---
+// Break styles apply at column boundaries as well as page boundaries.
+#set page(width: 140pt, height: 80pt, margin: 5pt)
+#columns(2, gutter: 10pt)[
+  #block(
+    width: 100%,
+    fill: luma(230),
+    stroke: 2pt + black,
+    break-stroke: (top: red, bottom: blue),
+    radius: 7pt,
+    break-radius: 0pt,
+    inset: 4pt,
+  )[
+    First column.
+    #colbreak()
+    Second column.
+  ]
+]
+
+--- block-break-style-context paged empty ---
+#context {
+  test(block.break-stroke, auto)
+  test(block.break-radius, auto)
+}
+
+// A stroke dictionary without `top` or `bottom` is a scalar stroke.
+#{
+  set block(break-stroke: (paint: green))
+  context test(block.break-stroke, stroke(paint: green))
+}
+
+#set block(break-stroke: 2pt + red, break-radius: 4pt)
+#{
+  set block(
+    break-stroke: (top: blue),
+    break-radius: (top-left: 1pt),
+  )
+  context {
+    test(block.break-stroke, (top: 2pt + blue, bottom: 2pt + red))
+    test(block.break-radius, (
+      top-left: 1pt,
+      top-right: 4pt,
+      bottom-right: 4pt,
+      bottom-left: 4pt,
+    ))
+  }
+}
+
+#{
+  set block(break-stroke: auto, break-radius: auto)
+  context {
+    test(block.break-stroke, auto)
+    test(block.break-radius, auto)
+  }
+}
+
+--- block-break-stroke-invalid-keys eval ---
+// Error: 1:22-6:2 unexpected keys "left", "right", and "rest", valid keys are "top" and "bottom"
+#block(break-stroke: (
+  top: red,
+  left: red,
+  right: red,
+  rest: red,
+))
+
 --- block-box-fill paged ---
 #set page(height: 100pt)
 #let words = lorem(18).split()
@@ -233,6 +350,25 @@ world 2
 #block(width: 5em, height: 2em, clip: true, stroke: 1pt + black)[
   But, soft! what light through yonder window breaks? It is the east, and Juliet
   is the sun.
+]
+
+--- block-break-style-clip paged ---
+// The clip curve must use the same per-segment stroke and radius as painting.
+#set page(width: 100pt, height: 70pt, margin: 5pt)
+#set block(above: 0pt, below: 0pt)
+#block(
+  width: 55pt,
+  fill: aqua,
+  stroke: 4pt + black,
+  break-stroke: (top: 1pt + red, bottom: 7pt + blue),
+  radius: 10pt,
+  break-radius: (top: 0pt, bottom: 3pt),
+  inset: 4pt,
+  clip: true,
+)[
+  #for color in (red, green, orange, purple, yellow) {
+    block(width: 80pt, height: 18pt, fill: color)
+  }
 ]
 
 --- block-clip-svg-glyphs paged ---
@@ -399,6 +535,22 @@ A #box(html.div()) B
 #set page(height: 50pt)
 A
 #block(fill: aqua, stroke: blue, inset: 5pt, width: 100%, block[B])
+
+--- block-break-style-skip-empty-first paged ---
+// An empty orphan does not make the migrated first visible segment a
+// continuation.
+#set page(height: 50pt)
+A
+#block(
+  fill: aqua,
+  stroke: 3pt + black,
+  break-stroke: (top: red, bottom: blue),
+  radius: 7pt,
+  break-radius: 0pt,
+  inset: 5pt,
+  width: 100%,
+  block[B],
+)
 
 --- issue-6304-block-skip-label paged ---
 // Ensure that labeling is skipped for an empty orphan frame.

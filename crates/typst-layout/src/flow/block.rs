@@ -3,16 +3,109 @@ use std::cell::LazyCell;
 use smallvec::SmallVec;
 use typst_library::diag::SourceResult;
 use typst_library::engine::Engine;
-use typst_library::foundations::{Packed, Resolve, StyleChain};
+use typst_library::foundations::{Fold, Packed, Resolve, Smart, StyleChain};
 use typst_library::introspection::Locator;
 use typst_library::layout::{
-    Abs, Axes, BlockBody, BlockElem, Fragment, Frame, FrameKind, Region, Regions, Rel,
-    Sides, Size, Sizing,
+    Abs, Axes, BlockBody, BlockElem, BreakSides, Corners, Fragment, Frame, FrameKind,
+    Region, Regions, Rel, Sides, Size, Sizing,
 };
-use typst_library::visualize::Stroke;
+use typst_library::visualize::{FixedStroke, Stroke};
 use typst_utils::Numeric;
 
 use crate::shapes::{clip_rect, fill_and_stroke};
+
+/// A regular style or precomputed styles for all combinations of break edges.
+enum BreakVariants<T> {
+    Regular(T),
+    Broken([T; 4]),
+}
+
+impl<T> BreakVariants<T> {
+    /// Selects a style by whether its top and bottom edges are break edges.
+    fn get(&self, top: bool, bottom: bool) -> &T {
+        match self {
+            Self::Regular(value) => value,
+            Self::Broken(values) => {
+                &values[usize::from(top) | (usize::from(bottom) << 1)]
+            }
+        }
+    }
+
+    /// Iterates over the regular style or all break variants.
+    fn iter(&self) -> std::slice::Iter<'_, T> {
+        match self {
+            Self::Regular(value) => std::slice::from_ref(value).iter(),
+            Self::Broken(values) => values.iter(),
+        }
+    }
+}
+
+/// Builds stroke variants for regular and broken top and bottom edges.
+fn stroke_variants(
+    regular: Sides<Option<FixedStroke>>,
+    breaks: BreakSides<Option<FixedStroke>>,
+) -> BreakVariants<Sides<Option<FixedStroke>>> {
+    let mut top = regular.clone();
+    top.top = breaks.top.clone();
+
+    let mut bottom = regular.clone();
+    bottom.bottom = breaks.bottom.clone();
+
+    let mut both = top.clone();
+    both.bottom = breaks.bottom;
+
+    BreakVariants::Broken([regular, top, bottom, both])
+}
+
+/// Builds radius variants for regular and broken top and bottom corners.
+fn radius_variants(
+    regular: Corners<Rel<Abs>>,
+    breaks: Corners<Rel<Abs>>,
+) -> BreakVariants<Corners<Rel<Abs>>> {
+    let mut top = regular;
+    top.top_left = breaks.top_left;
+    top.top_right = breaks.top_right;
+
+    let mut bottom = regular;
+    bottom.bottom_left = breaks.bottom_left;
+    bottom.bottom_right = breaks.bottom_right;
+
+    let mut both = top;
+    both.bottom_left = breaks.bottom_left;
+    both.bottom_right = breaks.bottom_right;
+
+    BreakVariants::Broken([regular, top, bottom, both])
+}
+
+/// Folds configured break strokes with their corresponding regular strokes.
+fn fold_break_strokes(
+    breaks: Smart<BreakSides<Option<Option<Stroke<Abs>>>>>,
+    regular: &Sides<Option<Stroke<Abs>>>,
+) -> BreakSides<Option<Stroke<Abs>>> {
+    let inherited = BreakSides::new(regular.top.clone(), regular.bottom.clone());
+    match breaks {
+        Smart::Auto => inherited,
+        Smart::Custom(breaks) => {
+            breaks.zip(inherited).map(|(broken, regular)| match broken {
+                Some(broken) => broken.fold(regular),
+                None => regular,
+            })
+        }
+    }
+}
+
+/// Fills missing break radii with their corresponding regular radii.
+fn fold_break_radii(
+    breaks: Smart<Corners<Option<Rel<Abs>>>>,
+    regular: Corners<Option<Rel<Abs>>>,
+) -> Corners<Option<Rel<Abs>>> {
+    match breaks {
+        Smart::Auto => regular,
+        Smart::Custom(breaks) => {
+            breaks.zip(regular).map(|(broken, regular)| broken.or(regular))
+        }
+    }
+}
 
 /// Lay this out as an unbreakable block.
 #[typst_macros::time(name = "block", span = elem.span())]
@@ -188,30 +281,51 @@ pub fn layout_multi_block(
         }
     };
 
-    // Prepare fill and stroke.
-    let fill = elem.fill.get_ref(styles);
-    let stroke = elem
-        .stroke
-        .resolve(styles)
-        .unwrap_or_default()
-        .map(|s| s.map(Stroke::unwrap_or_default));
-
-    // Only fetch these if necessary (for clipping or filling/stroking).
-    let outset = LazyCell::new(|| elem.outset.resolve(styles).unwrap_or_default());
-    let radius = LazyCell::new(|| elem.radius.resolve(styles).unwrap_or_default());
-
-    // Fetch/compute these outside of the loop.
-    let clip = elem.clip.get(styles);
-    let has_fill_or_stroke = fill.is_some() || stroke.iter().any(Option::is_some);
-    let has_inset = !inset.is_zero();
-    let is_explicit = matches!(body, None | Some(BlockBody::Content(_)));
-
     // Skip filling, stroking and labeling the first frame if it is empty and
     // a non-empty one follows.
     let mut skip_first = false;
     if let [first, rest @ ..] = fragment.as_slice() {
         skip_first = first.is_empty() && rest.iter().any(|frame| !frame.is_empty());
     }
+
+    // Determine the actual segment range after excluding an empty orphan.
+    let first = usize::from(skip_first);
+    let last = fragment.as_slice().len().saturating_sub(1);
+    let has_break = first < last;
+
+    // Prepare fill and stroke. Break strokes only need to be resolved if the
+    // block produced multiple actual segments.
+    let fill = elem.fill.get_ref(styles);
+    let regular_strokes = elem.stroke.resolve(styles).unwrap_or_default();
+    let break_strokes = has_break.then(|| {
+        fold_break_strokes(elem.break_stroke.resolve(styles), &regular_strokes)
+            .map(|stroke| stroke.map(Stroke::unwrap_or_default))
+    });
+    let regular_strokes =
+        regular_strokes.map(|stroke| stroke.map(Stroke::unwrap_or_default));
+    let strokes = match break_strokes {
+        Some(breaks) => stroke_variants(regular_strokes, breaks),
+        None => BreakVariants::Regular(regular_strokes),
+    };
+
+    // Only fetch these if necessary (for clipping or filling/stroking).
+    let outset = LazyCell::new(|| elem.outset.resolve(styles).unwrap_or_default());
+    let radii = LazyCell::new(|| {
+        let regular = elem.radius.resolve(styles);
+        if has_break {
+            let breaks = fold_break_radii(elem.break_radius.resolve(styles), regular);
+            radius_variants(regular.unwrap_or_default(), breaks.unwrap_or_default())
+        } else {
+            BreakVariants::Regular(regular.unwrap_or_default())
+        }
+    });
+
+    // Fetch/compute these outside of the loop.
+    let clip = elem.clip.get(styles);
+    let has_fill_or_stroke =
+        fill.is_some() || strokes.iter().any(|stroke| stroke.iter().any(Option::is_some));
+    let has_inset = !inset.is_zero();
+    let is_explicit = matches!(body, None | Some(BlockBody::Content(_)));
 
     // Post-process to apply insets, clipping, fills, and strokes.
     for (i, (frame, region)) in fragment.iter_mut().zip(pod.iter()).enumerate() {
@@ -229,14 +343,20 @@ pub fn layout_multi_block(
             crate::pad::grow(frame, &inset);
         }
 
+        let top_break = i > first;
+        let bottom_break = i >= first && i < last;
+        let stroke = strokes.get(top_break, bottom_break);
+
         // Clip the contents, if requested.
         if clip {
-            frame.clip(clip_rect(frame.size(), &radius, &stroke, &outset));
+            let radius = radii.get(top_break, bottom_break);
+            frame.clip(clip_rect(frame.size(), radius, stroke, &outset));
         }
 
         // Add fill and/or stroke.
-        if has_fill_or_stroke && (i > 0 || !skip_first) {
-            fill_and_stroke(frame, fill.clone(), &stroke, &outset, &radius, elem.span());
+        if has_fill_or_stroke && i >= first {
+            let radius = radii.get(top_break, bottom_break);
+            fill_and_stroke(frame, fill.clone(), stroke, &outset, radius, elem.span());
         }
     }
 

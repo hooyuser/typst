@@ -42,6 +42,11 @@ ec988f48053bcc2b5c7accd247811591 bidi-explicit-dir
 b9d7489afe73f66025a36c79304b8b19 bidi-spacing
 51cd3f34ffa5a1c1de54ace4dda35fc3 bidi-whitespace-reset
 c187a1561a383b606f4a983e84d4100c block-box-fill
+1bdbe18cab2c62394bce0575639942d7 block-break-stroke-radius
+12d4f3bc306a46fa8d8ef70d5b88fdea block-break-style-clip
+08448199b4ad1b0d18374d7c63379265 block-break-style-columns
+80b7761291075c6e2297619c57533c71 block-break-style-reset-none
+1846692c5e5ea169ca4c42ae99c8ce00 block-break-style-skip-empty-first
 0ae4e4d661a55d31f357bb82356aa83f block-clip-svg-glyphs
 72a5a7db8befa759f88995c2d32d2ea6 block-clip-text
 fbd3d4ceada48ba36542f5e3afb48c45 block-clipping-multiple-pages
